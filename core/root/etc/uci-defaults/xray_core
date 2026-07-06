@@ -1,0 +1,25 @@
+#!/bin/sh
+uci get xray_core.@general[-1] >/dev/null 2>&1 || uci add xray_core general >/dev/null 2>&1
+
+# Backfill geo update defaults; -q get guard preserves user overrides on upgrade.
+[ -z "$(uci -q get xray_core.@general[0].geo_geoip_url)" ] \
+	&& uci set xray_core.@general[0].geo_geoip_url='https://raw.githubusercontent.com/Fadix47/v2ray-rules/refs/heads/main/geoip.dat'
+[ -z "$(uci -q get xray_core.@general[0].geo_geosite_url)" ] \
+	&& uci set xray_core.@general[0].geo_geosite_url='https://raw.githubusercontent.com/Fadix47/v2ray-rules/refs/heads/main/geosite.dat'
+[ -z "$(uci -q get xray_core.@general[0].geo_update_interval_hours)" ] \
+	&& uci set xray_core.@general[0].geo_update_interval_hours='24'
+
+# Migrate xray_bin to /usr/local/bin/xray (opkg dep gone; installs come from core_install.sh).
+CUR_BIN=$(uci -q get xray_core.@general[0].xray_bin)
+if [ -z "${CUR_BIN}" ] || ! [ -x "${CUR_BIN}" ]; then
+	uci set xray_core.@general[0].xray_bin='/usr/local/bin/xray'
+fi
+
+uci commit xray_core
+uci -q batch <<-EOF >/dev/null
+	delete ucitrack.@xray_core[-1]
+	add ucitrack xray_core
+	set ucitrack.@xray_core[-1].init=xray_core
+	commit ucitrack
+EOF
+exit 0

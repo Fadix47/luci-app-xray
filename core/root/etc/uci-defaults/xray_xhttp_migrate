@@ -1,0 +1,38 @@
+#!/bin/sh
+# v3.9.0 rename: splithttp_* → xhttp_* in every `servers` UCI section,
+# transport value "splithttp" → "xhttp". Idempotent; safe to re-run.
+
+. /lib/functions.sh
+
+OPTS="path host mode \
+extra_sc_max_concurrent_posts extra_sc_max_each_post_bytes \
+extra_sc_min_posts_interval_ms extra_no_sse_header \
+extra_x_padding_bytes extra_json \
+download_address download_port download_path download_host"
+
+migrate_one() {
+    local sid="$1"
+    local t
+    t=$(uci -q get "xray_core.${sid}.transport")
+    [ "${t}" = "splithttp" ] && uci -q set "xray_core.${sid}.transport=xhttp"
+
+    for opt in ${OPTS}; do
+        local old="splithttp_${opt}"
+        local new="xhttp_${opt}"
+        local v
+        # honour both list and single-value options
+        v=$(uci -q get "xray_core.${sid}.${old}")
+        if [ -n "${v}" ] && [ -z "$(uci -q get "xray_core.${sid}.${new}")" ]; then
+            uci -q set "xray_core.${sid}.${new}=${v}"
+            uci -q delete "xray_core.${sid}.${old}"
+        elif [ -n "${v}" ]; then
+            # both old and new exist — drop old to avoid confusion
+            uci -q delete "xray_core.${sid}.${old}"
+        fi
+    done
+}
+
+config_load xray_core
+config_foreach migrate_one servers
+uci -q commit xray_core
+exit 0

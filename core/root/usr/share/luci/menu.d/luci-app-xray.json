@@ -1,0 +1,17 @@
+{
+    "admin/services/xray_core": {
+        "title": "Xray",
+        "action": {
+            "type": "view",
+            "path": "xray/core"
+        },
+        "depends": {
+            "acl": [
+                "luci-app-xray"
+            ],
+            "uci": {
+                "xray_core": true
+            }
+        }
+    }
+}

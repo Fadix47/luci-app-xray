@@ -1,0 +1,287 @@
+#!/bin/sh
+
+XRAY_BIN=$(uci -q get xray_core.@general[0].xray_bin 2>/dev/null)
+[ -z "${XRAY_BIN}" ] && XRAY_BIN=/usr/bin/xray
+
+main() {
+    case "$1" in
+        list)
+            cat <<'EOF'
+{
+    "statsquery": {},
+    "statssys": {},
+    "restartlogger": {},
+    "subscription_fetch": {"sub_id": "str"},
+    "subscription_fetch_all": {},
+    "subscription_add": {"url": "str"},
+    "import_links": {"text": "str"},
+    "service_start": {},
+    "service_stop": {},
+    "service_restart": {},
+    "service_reload": {},
+    "service_status": {},
+    "service_enable": {},
+    "service_disable": {},
+    "service_enabled": {},
+    "core_list_releases": {},
+    "core_install": {"tag": "str"},
+    "core_install_status": {},
+    "core_current_version": {},
+    "geo_update_now": {},
+    "geo_status": {},
+    "public_list_update_now": {"sid": "str"},
+    "public_list_status": {},
+    "community_catalog_list": {},
+    "community_catalog_refresh": {},
+    "ping_server": {"sub_id": "str", "method": "str", "target": "str"},
+    "ping_all":    {"method": "str", "target": "str", "sids": ["str"]}
+}
+EOF
+            ;;
+        call)
+            method="$2"
+            case "${method}" in
+                statsquery|statssys|restartlogger)
+                    "${XRAY_BIN}" api "${method}"
+                    ;;
+                subscription_fetch)
+                    input=$(cat)
+                    sub_id=$(echo "${input}" | jsonfilter -e '@.sub_id')
+                    [ -z "${sub_id}" ] && { printf '{"code":1,"error":"missing sub_id"}\n'; return; }
+                    out=$(/usr/share/xray/sub/update.sh "${sub_id}" 2>&1)
+                    ec=$?
+                    printf '{"code":%d,"log":%s}\n' "${ec}" "$(printf '%s' "${out}" | jq -Rs .)"
+                    ;;
+                subscription_fetch_all)
+                    out=$(/usr/share/xray/sub/update.sh 2>&1)
+                    ec=$?
+                    printf '{"code":%d,"log":%s}\n' "${ec}" "$(printf '%s' "${out}" | jq -Rs .)"
+                    ;;
+                subscription_add)
+                    input=$(cat)
+                    url=$(echo "${input}" | jsonfilter -e '@.url')
+                    if [ -z "${url}" ]; then
+                        printf '{"code":1,"error":"missing url"}\n'
+                        return
+                    fi
+                    sid=$(uci add xray_core subscription)
+                    if [ -z "${sid}" ]; then
+                        printf '{"code":2,"error":"uci add failed"}\n'
+                        return
+                    fi
+                    uci set "xray_core.${sid}.url=${url}"
+                    uci set "xray_core.${sid}.enabled=1"
+                    uci commit xray_core
+                    /usr/share/xray/sub/cron_install.sh >/dev/null 2>&1
+                    out=$(/usr/share/xray/sub/update.sh "${sid}" 2>&1)
+                    ec=$?
+                    printf '{"code":%d,"sub_id":"%s","log":%s}\n' "${ec}" "${sid}" "$(printf '%s' "${out}" | jq -Rs .)"
+                    ;;
+                import_links)
+                    # Parse one-or-more pasted share links (vless://, hysteria2://,
+                    # vmess://, trojan://, ss://, socks://, http://) into standalone
+                    # manual server sections. No subscription is created.
+                    input=$(cat)
+                    text=$(echo "${input}" | jsonfilter -e '@.text')
+                    if [ -z "${text}" ]; then
+                        printf '{"code":1,"error":"missing text"}\n'
+                        return
+                    fi
+                    parsedtmp=$(mktemp)
+                    printf '%s\n' "${text}" | ucode /usr/share/xray/sub/parse.uc >"${parsedtmp}" 2>/tmp/xray_import.err
+                    n_parsed=$(jsonfilter -i "${parsedtmp}" -e '@[*].protocol' 2>/dev/null | wc -l)
+                    if [ "${n_parsed}" -eq 0 ]; then
+                        rm -f "${parsedtmp}"
+                        printf '{"code":2,"added":0,"error":"no valid links parsed","log":%s}\n' \
+                            "$(head -c 400 /tmp/xray_import.err 2>/dev/null | jq -Rs .)"
+                        return
+                    fi
+                    out=$(ucode /usr/share/xray/sub/import.uc <"${parsedtmp}" 2>/tmp/xray_import.err)
+                    ec=$?
+                    rm -f "${parsedtmp}"
+                    added=$(echo "${out}" | jsonfilter -e '@.added' 2>/dev/null)
+                    [ -z "${added}" ] && added=0
+                    if [ "${ec}" -eq 10 ]; then
+                        /etc/init.d/xray_core reload >/dev/null 2>&1
+                    fi
+                    if [ "${added}" -eq 0 ]; then
+                        printf '{"code":3,"added":0,"parsed":%d,"error":"parsed but not written","log":%s}\n' \
+                            "${n_parsed}" "$(head -c 600 /tmp/xray_import.err 2>/dev/null | jq -Rs .)"
+                        return
+                    fi
+                    printf '{"code":0,"added":%d,"parsed":%d}\n' "${added}" "${n_parsed}"
+                    ;;
+                service_start|service_stop|service_restart|service_reload)
+                    cmd=${method#service_}
+                    /etc/init.d/xray_core "${cmd}" >/dev/null 2>&1
+                    printf '{"code":%d}\n' $?
+                    ;;
+                service_status)
+                    if /etc/init.d/xray_core running >/dev/null 2>&1; then
+                        state=running
+                    else
+                        state=stopped
+                    fi
+                    printf '{"running":"%s"}\n' "${state}"
+                    ;;
+                service_enable|service_disable)
+                    cmd=${method#service_}
+                    /etc/init.d/xray_core "${cmd}" >/dev/null 2>&1
+                    printf '{"code":%d}\n' $?
+                    ;;
+                service_enabled)
+                    if /etc/init.d/xray_core enabled; then
+                        enabled=true
+                    else
+                        enabled=false
+                    fi
+                    printf '{"enabled":%s}\n' "${enabled}"
+                    ;;
+                core_list_releases)
+                    /usr/share/xray/sub/core_install.sh list
+                    ;;
+                core_install)
+                    # Background install; UI polls core_install_status until done
+                    # (sync handler exceeded XHR timeout on slow links).
+                    input=$(cat)
+                    tag=$(echo "${input}" | jsonfilter -e '@.tag')
+                    [ -z "${tag}" ] && { printf '{"code":1,"error":"missing tag"}\n'; return; }
+                    if [ -s /tmp/xray_core_install.pid ]; then
+                        old_pid=$(cat /tmp/xray_core_install.pid)
+                        if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+                            printf '{"code":2,"error":"install already running","pid":%d}\n' "${old_pid}"
+                            return
+                        fi
+                    fi
+                    rm -f /tmp/xray_core_install.log /tmp/xray_core_install.exit /tmp/xray_core_install.pid
+                    setsid sh -c '
+                        /usr/share/xray/sub/core_install.sh install "$1" > /tmp/xray_core_install.log 2>&1
+                        echo $? > /tmp/xray_core_install.exit
+                        rm -f /tmp/xray_core_install.pid
+                    ' _ "${tag}" </dev/null >/dev/null 2>&1 &
+                    install_pid=$!
+                    echo "${install_pid}" > /tmp/xray_core_install.pid
+                    printf '{"code":0,"started":true,"pid":%d}\n' "${install_pid}"
+                    ;;
+                core_install_status)
+                    state="idle"
+                    exit_code="null"
+                    log=""
+                    [ -s /tmp/xray_core_install.log ] && log=$(tail -c 8192 /tmp/xray_core_install.log)
+                    if [ -s /tmp/xray_core_install.exit ]; then
+                        state="done"
+                        exit_code=$(cat /tmp/xray_core_install.exit)
+                    elif [ -s /tmp/xray_core_install.pid ]; then
+                        pid=$(cat /tmp/xray_core_install.pid)
+                        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+                            state="running"
+                        else
+                            state="dead"
+                        fi
+                    fi
+                    printf '{"state":"%s","exit":%s,"log":%s}\n' "${state}" "${exit_code}" "$(printf '%s' "${log}" | jq -Rs .)"
+                    ;;
+                core_current_version)
+                    ver=$("${XRAY_BIN}" version 2>/dev/null | head -n1)
+                    printf '{"version":%s,"path":"%s"}\n' "$(printf '%s' "${ver}" | jq -Rs .)" "${XRAY_BIN}"
+                    ;;
+                geo_update_now)
+                    out=$(/usr/share/xray/sub/geo_update.sh 2>&1)
+                    ec=$?
+                    printf '{"code":%d,"log":%s}\n' "${ec}" "$(printf '%s' "${out}" | jq -Rs .)"
+                    ;;
+                public_list_update_now)
+                    input=$(cat)
+                    # Optional `sid` updates that single list by id; absent ⇒
+                    # iterate every entry in `community_lists`.
+                    sid=$(echo "${input}" | jsonfilter -e '@.sid' 2>/dev/null)
+                    if [ -n "${sid}" ]; then
+                        out=$(/usr/share/xray/sub/public_list_update.sh "${sid}" 2>&1)
+                    else
+                        out=$(/usr/share/xray/sub/public_list_update.sh 2>&1)
+                    fi
+                    ec=$?
+                    /usr/share/xray/sub/cron_install.sh >/dev/null 2>&1
+                    printf '{"code":%d,"log":%s}\n' "${ec}" "$(printf '%s' "${out}" | jq -Rs .)"
+                    ;;
+                public_list_status)
+                    # Per-id size/mtime keyed by dropdown id (not UCI section name).
+                    out="{"
+                    first=1
+                    sel=$(uci -q get xray_core.@general[0].community_lists)
+                    for id in ${sel}; do
+                        # Skip ids the fetcher would reject — no UCI junk in status.
+                        case "${id}" in
+                            ''|*[!A-Za-z0-9._-]*|.*) continue ;;
+                        esac
+                        d="/usr/share/xray/public_lists/${id}.domains"
+                        s="/usr/share/xray/public_lists/${id}.subnets"
+                        dc=0; sc=0; mt=0
+                        [ -f "${d}" ] && dc=$(wc -l <"${d}" 2>/dev/null)
+                        [ -f "${s}" ] && sc=$(wc -l <"${s}" 2>/dev/null)
+                        [ -f "${d}" ] && mt=$(date -r "${d}" +%s 2>/dev/null)
+                        [ "${mt}" = 0 ] && [ -f "${s}" ] && mt=$(date -r "${s}" +%s 2>/dev/null)
+                        [ "${first}" = 1 ] || out="${out},"
+                        first=0
+                        out=$(printf '%s"%s":{"domains":%d,"subnets":%d,"mtime":%d}' \
+                            "${out}" "${id}" "${dc:-0}" "${sc:-0}" "${mt:-0}")
+                    done
+                    out="${out}}"
+                    last_updated=$(uci -q get xray_core.@general[0].community_lists_last_updated)
+                    catalog_updated=$(uci -q get xray_core.@general[0].community_catalog_last_updated)
+                    printf '{"items":%s,"last_updated":%d,"catalog_updated":%d}\n' \
+                        "${out}" "${last_updated:-0}" "${catalog_updated:-0}"
+                    ;;
+                community_catalog_list)
+                    # Cached catalog snapshot; empty array pre-fetch (UI shows Refresh).
+                    if [ -f /usr/share/xray/public_lists/_catalog.json ]; then
+                        body=$(cat /usr/share/xray/public_lists/_catalog.json 2>/dev/null)
+                    fi
+                    [ -z "${body}" ] && body="[]"
+                    last=$(uci -q get xray_core.@general[0].community_catalog_last_updated)
+                    printf '{"items":%s,"last_updated":%d}\n' "${body}" "${last:-0}"
+                    ;;
+                community_catalog_refresh)
+                    out=$(/usr/share/xray/sub/public_list_update.sh --catalog 2>&1)
+                    ec=$?
+                    printf '{"code":%d,"log":%s}\n' "${ec}" "$(printf '%s' "${out}" | jq -Rs .)"
+                    ;;
+                ping_server)
+                    input=$(cat)
+                    sid=$(echo "${input}" | jsonfilter -e '@.sub_id')
+                    method=$(echo "${input}" | jsonfilter -e '@.method')
+                    target=$(echo "${input}" | jsonfilter -e '@.target')
+                    [ -z "${sid}" ] && { printf '{"ok":false,"error":"missing sub_id"}\n'; return; }
+                    /usr/share/xray/sub/ping.sh "${sid}" "${method:-head}" "${target:-http://www.gstatic.com/generate_204}"
+                    ;;
+                ping_all)
+                    input=$(cat)
+                    method=$(echo "${input}" | jsonfilter -e '@.method')
+                    target=$(echo "${input}" | jsonfilter -e '@.target')
+                    # Optional sid list — UI streams results in batches of 5 via this arg.
+                    sids=$(echo "${input}" | jsonfilter -e '@.sids[*]' 2>/dev/null | tr '\n' ' ')
+                    # shellcheck disable=SC2086  # intentional word-splitting on sids
+                    arr=$(/usr/share/xray/sub/ping_batch.sh "${method:-head}" "${target:-http://www.gstatic.com/generate_204}" ${sids})
+                    [ -z "${arr}" ] && arr="[]"
+                    printf '{"results":%s}\n' "${arr}"
+                    ;;
+                geo_status)
+                    geoip_size=0; geoip_mtime=0
+                    geosite_size=0; geosite_mtime=0
+                    if [ -f /usr/share/xray/geoip.dat ]; then
+                        geoip_size=$(wc -c </usr/share/xray/geoip.dat 2>/dev/null)
+                        geoip_mtime=$(date -r /usr/share/xray/geoip.dat +%s 2>/dev/null)
+                    fi
+                    if [ -f /usr/share/xray/geosite.dat ]; then
+                        geosite_size=$(wc -c </usr/share/xray/geosite.dat 2>/dev/null)
+                        geosite_mtime=$(date -r /usr/share/xray/geosite.dat +%s 2>/dev/null)
+                    fi
+                    printf '{"geoip":{"size":%d,"mtime":%d},"geosite":{"size":%d,"mtime":%d}}\n' \
+                        "${geoip_size:-0}" "${geoip_mtime:-0}" "${geosite_size:-0}" "${geosite_mtime:-0}"
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+main "$@"

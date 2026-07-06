@@ -1,0 +1,8 @@
+config general
+	list tproxy_ifaces_v4 'br-lan'
+	list tproxy_ifaces_v6 'br-lan'
+	option transparent_proxy_enable '1'
+	option xray_bin '/usr/local/bin/xray'
+	option geo_geoip_url 'https://raw.githubusercontent.com/Fadix47/v2ray-rules/refs/heads/main/geoip.dat'
+	option geo_geosite_url 'https://raw.githubusercontent.com/Fadix47/v2ray-rules/refs/heads/main/geosite.dat'
+	option geo_update_interval_hours '24'

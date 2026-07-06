@@ -1,0 +1,37 @@
+#!/bin/sh
+# Migrate legacy /etc/config/xray_sub (luci-app-xray-sub) into a subscription
+# section of /etc/config/xray_core, then drop the old config file.
+
+[ -f /etc/config/xray_sub ] || exit 0
+
+OLD_URL=$(uci -q get xray_sub.main.url 2>/dev/null)
+OLD_IV_MIN=$(uci -q get xray_sub.main.interval 2>/dev/null)
+OLD_ENABLED=$(uci -q get xray_sub.main.enabled 2>/dev/null)
+
+if [ -n "${OLD_URL}" ]; then
+    # legacy interval is in minutes — convert to hours, min 1
+    IV_HOURS=24
+    case "${OLD_IV_MIN}" in
+        ''|*[!0-9]*) IV_HOURS=24 ;;
+        *)
+            if [ "${OLD_IV_MIN}" -lt 60 ]; then IV_HOURS=1
+            else IV_HOURS=$((OLD_IV_MIN / 60)); fi
+            ;;
+    esac
+    [ "${IV_HOURS}" -lt 1 ] && IV_HOURS=1
+
+    uci -q set xray_core.migrated="subscription"
+    uci -q set xray_core.migrated.name="migrated"
+    uci -q set xray_core.migrated.url="${OLD_URL}"
+    uci -q set xray_core.migrated.enabled="${OLD_ENABLED:-1}"
+    uci -q set xray_core.migrated.update_interval_hours="${IV_HOURS}"
+    uci -q commit xray_core
+fi
+
+rm -f /etc/config/xray_sub
+# Also clean up legacy cron line (luci-app-xray-sub used "# xray_sub_update")
+if [ -f /etc/crontabs/root ]; then
+    sed -i '/xray_sub_update/d' /etc/crontabs/root
+    /etc/init.d/cron reload >/dev/null 2>&1 || true
+fi
+exit 0

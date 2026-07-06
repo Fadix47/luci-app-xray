@@ -1,0 +1,50 @@
+{
+    "luci-app-xray": {
+        "description": "Grant access to xray configurations and the xray RPC backend",
+        "read": {
+            "uci": [
+                "xray_core"
+            ],
+            "ubus": {
+                "xray": [
+                    "statsquery",
+                    "statssys",
+                    "service_status",
+                    "service_enabled",
+                    "core_list_releases",
+                    "core_install_status",
+                    "core_current_version",
+                    "geo_status",
+                    "public_list_status",
+                    "community_catalog_list",
+                    "ping_server",
+                    "ping_all"
+                ]
+            }
+        },
+        "write": {
+            "uci": [
+                "xray_core"
+            ],
+            "ubus": {
+                "xray": [
+                    "restartlogger",
+                    "subscription_fetch",
+                    "subscription_fetch_all",
+                    "subscription_add",
+                    "import_links",
+                    "service_start",
+                    "service_stop",
+                    "service_restart",
+                    "service_reload",
+                    "service_enable",
+                    "service_disable",
+                    "core_install",
+                    "geo_update_now",
+                    "public_list_update_now",
+                    "community_catalog_refresh"
+                ]
+            }
+        }
+    }
+}
