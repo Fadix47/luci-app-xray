@@ -6,3 +6,4 @@ config general
 	option geo_geoip_url 'https://raw.githubusercontent.com/Fadix47/v2ray-rules/refs/heads/main/geoip.dat'
 	option geo_geosite_url 'https://raw.githubusercontent.com/Fadix47/v2ray-rules/refs/heads/main/geosite.dat'
 	option geo_update_interval_hours '24'
+	option geo_disabled 1
