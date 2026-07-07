@@ -142,7 +142,7 @@ check_system() {
     # Check available space on flash. postinst pulls the Xray core binary
     # (~40MB) into /usr/local/bin and the geoip/geosite data (~12MB) into /usr/share/xray
     AVAILABLE_SPACE=$(df /overlay | awk 'NR==2 {print $4}')
-    REQUIRED_SPACE=61440 # 60MB in KB
+    REQUIRED_SPACE=49152 # 48MB in KB
 
     if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
         msg "Error: Insufficient space in flash"
