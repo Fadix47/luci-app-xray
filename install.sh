@@ -27,6 +27,16 @@ pkg_list_update() {
     fi
 }
 
+pkg_is_installed() {
+    local pkg_name="$1"
+
+    if [ "$PKG_IS_APK" -eq 1 ]; then
+        apk info -e "$pkg_name" >/dev/null 2>&1
+    else
+        opkg list-installed "$pkg_name" 2>/dev/null | grep -q "^$pkg_name "
+    fi
+}
+
 pkg_install() {
     local pkg_file="$1"
 
@@ -139,16 +149,36 @@ check_system() {
         exit 1
     fi
 
-    # Check available space on flash. postinst pulls the Xray core binary
-    # (~40MB) into /usr/local/bin and the geoip/geosite data (~12MB) into /usr/share/xray
-    AVAILABLE_SPACE=$(df /overlay | awk 'NR==2 {print $4}')
-    REQUIRED_SPACE=49152 # 48MB in KB
-
-    if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
-        msg "Error: Insufficient space in flash"
-        msg "Available: $((AVAILABLE_SPACE/1024))MB"
-        msg "Required: $((REQUIRED_SPACE/1024))MB"
+    # Warn if a conflicting proxy core is running.
+    if [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box enabled 2>/dev/null; then
+        msg "Внимание: обнаружено включённое ядро sing-box."
+        msg "Отключите его вручную перед запуском xray, иначе будет конфликт портов"
+        msg "Warning: an enabled sing-box core was detected."
+        msg "Disable it manually before running xray to avoid a port conflict"
         exit 1
+    fi
+
+    # Warn if the Xray core is already installed from the OpenWrt feed
+    if pkg_is_installed xray-core; then
+        msg "Внимание: пакет xray-core установлен из репозитория (opkg/apk)."
+        msg "Он будет конфликтовать с ядром luci-app-xray в /usr/local/bin/xray."
+        msg "Warning: package xray-core is installed from the feed (opkg/apk)."
+        msg "It will conflict with the luci-app-xray core in /usr/local/bin/xray."
+        exit 1
+    fi
+
+    if [ ! -x /usr/local/bin/xray ]; then
+        # Check available space on flash. postinst pulls the Xray core binary
+        # (~40MB) into /usr/local/bin and the geoip/geosite data (~12MB) into /usr/share/xray
+        AVAILABLE_SPACE=$(df /overlay | awk 'NR==2 {print $4}')
+        REQUIRED_SPACE=49152 # 48MB in KB
+
+        if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
+            msg "Error: Insufficient space in flash"
+            msg "Available: $((AVAILABLE_SPACE/1024))MB"
+            msg "Required: $((REQUIRED_SPACE/1024))MB"
+            exit 1
+        fi
     fi
 
     if ! nslookup google.com >/dev/null 2>&1; then
