@@ -35,6 +35,12 @@ const callCatalogList    = rpc.declare({ object: 'xray', method: 'community_cata
 const callCatalogRefresh = rpc.declare({ object: 'xray', method: 'community_catalog_refresh', expect: { '': {} } });
 const callPing           = rpc.declare({ object: 'xray', method: 'ping_server',            params: ['sub_id', 'method', 'target'], expect: { '': {} } });
 const callPingAll        = rpc.declare({ object: 'xray', method: 'ping_all',                params: ['method', 'target', 'sids'], expect: { 'results': [] } });
+const callAwgStatus      = rpc.declare({ object: 'xray', method: 'awg_status',             expect: { '': {} } });
+const callAwgRegister    = rpc.declare({ object: 'xray', method: 'awg_warp_register',      params: ['server'], expect: { '': {} } });
+const callAwgRegStatus   = rpc.declare({ object: 'xray', method: 'awg_register_status',    expect: { '': {} } });
+const callAwgImport      = rpc.declare({ object: 'xray', method: 'awg_import',             params: ['text'], expect: { '': {} } });
+const callAwgPkgInstall  = rpc.declare({ object: 'xray', method: 'awg_pkg_install',        expect: { '': {} } });
+const callAwgPkgStatus   = rpc.declare({ object: 'xray', method: 'awg_pkg_install_status', expect: { '': {} } });
 
 function notify(success, msg) {
     ui.addNotification(null, E('p', {}, msg), success ? 'info' : 'danger');
@@ -177,6 +183,8 @@ return view.extend({
             // Cached snapshot only — no GitHub fetch here, or an unreachable
             // GitHub would block the "Loading view" spinner for 15s+.
             callCatalogList().catch(() => ({ items: [], last_updated: 0 })),
+            callAwgStatus().catch(() => ({})),
+            network.getDevices().catch(() => []),
         ]);
     },
 
@@ -192,6 +200,19 @@ return view.extend({
         const geoStat    = load_result[7];
         const pubListStat = load_result[8] || { items: {}, last_updated: 0, catalog_updated: 0 };
         const catalog     = load_result[9] || { items: [], last_updated: 0 };
+        const awgStat     = load_result[10] || {};
+        // Block-target interface candidates, AWG-like names first.
+        const awgIfaceCandidates = (function () {
+            const names = ['awg0'];
+            for (const d of (load_result[11] || [])) {
+                const n = d && (d.name || d.ifname || (typeof d.getName === 'function' ? d.getName() : ''));
+                if (n && /^[a-zA-Z0-9_.-]{2,15}$/.test(n) && names.indexOf(n) < 0) names.push(n);
+            }
+            const score = n => /^awg/i.test(n) ? 0 : /amnezia/i.test(n) ? 1 : /^wg/i.test(n) ? 2 : 9;
+            return names.sort((a, b) => score(a) - score(b) || a.localeCompare(b));
+        })();
+        // AWG blocks stay locked until tools + a WARP key exist (panel above).
+        const awgReady = !!(awgStat.awg && awgStat.registered);
 
         let asset_file_status = _('WARNING: at least one of asset files (geoip.dat, geosite.dat) is not found under /usr/share/xray. Xray may not work properly. See <a href="https://github.com/Fadix47/luci-app-xray">here</a> for help.');
         if (geoip_existence) {
@@ -270,22 +291,10 @@ return view.extend({
                 mkBtn(_('Start'),   callServiceStart),
                 mkBtn(_('Stop'),    callServiceStop, 'remove'),
                 mkBtn(_('Restart'), callServiceRestart),
-                mkBtn(_('Reload'),  callServiceReload)
+                mkBtn(_('Reload'),  callServiceReload),
+                mkBtn(svcEnabled && svcEnabled.enabled ? _('Disable on boot') : _('Enable on boot'),
+                    svcEnabled && svcEnabled.enabled ? callServiceDisable : callServiceEnable, 'neutral'),
             ]);
-        };
-
-        let oCtlBoot = sCtl.option(form.Flag, '_ctl_boot', _('Enable on boot'));
-        oCtlBoot.cfgvalue = function () { return (svcEnabled && svcEnabled.enabled) ? '1' : '0'; };
-        oCtlBoot.write = function (_section_id, value) {
-            // LuCI calls write() on every save regardless of change — bail
-            // out if state matches to avoid spurious "Boot toggle" notifications.
-            const wanted = value === '1';
-            const current = !!(svcEnabled && svcEnabled.enabled);
-            if (wanted === current) return Promise.resolve();
-            return (wanted ? callServiceEnable() : callServiceDisable())
-                .then(function (r) {
-                    if (!(r && r.code === 0)) notify(false, _('Boot toggle failed'));
-                });
         };
 
         // ===== Main settings =====
@@ -306,7 +315,7 @@ return view.extend({
         s.tab('fake_dns',                   _('FakeDNS'));
         s.tab('extra_options',              _('Extra Options'));
 
-        o = s.taboption('general', form.Flag, 'transparent_proxy_enable', _('Enable Transparent Proxy'), _('Enable integrations with dnsmasq and nftables. To disable luci-app-xray completely, go to <a href="/cgi-bin/luci/admin/system/startup">Startup</a> and disable <code>xray_core</code>.'));
+
 
         // Unified picker mirrored into all four TCP/UDP × IPv4/IPv6 UCI keys on save,
         // since the backend still reads them separately.
@@ -968,6 +977,7 @@ return view.extend({
                 uci.unset(shared.variant, sid, optname);
                 uci.unset(shared.variant, sid, optname + '_text');
             };
+            opt.depends('routing_mode', 'simple');
             if (itemValidator) {
                 opt.validate = function (sid, value) {
                     if (!value) return true;
@@ -981,6 +991,14 @@ return view.extend({
             return opt;
         };
 
+        let oRoutingMode = s.taboption('outbound_routing', form.ListValue, 'routing_mode',
+            _('Routing mode'),
+            _('<b>Simple</b>: one global forward/bypass rule set (below). <b>Advanced Routing</b>: split tunnelling — create blocks that send their own domains/IPs/presets to different servers.'));
+        oRoutingMode.value('simple',   _('Simple'));
+        oRoutingMode.value('advanced', _('Advanced Routing (split tunnelling)'));
+        oRoutingMode.default = 'simple';
+        oRoutingMode.rmempty = false;
+
         // ===== Public lists (Routing tab) =====
         // Multi-select over the GitHub catalog; fetcher caches selected ids and prunes orphans.
         const catalogItems = Array.isArray(catalog.items) ? catalog.items : [];
@@ -991,6 +1009,7 @@ return view.extend({
             _('Pick one or more curated rule lists from the catalog. Selected lists auto-refresh every 6 hours.'));
         oCommunityLists.rmempty = true;
         oCommunityLists.placeholder = _('-- nothing selected --');
+        oCommunityLists.depends('routing_mode', 'simple');
 
         // Register catalog ids AND already-selected UCI ids — MultiValue drops unknown options on save.
         const optionMap = {};
@@ -1016,6 +1035,7 @@ return view.extend({
         // Status line: when was the catalog / selected lists last refreshed.
         let oPubListInfo = s.taboption('outbound_routing', form.DummyValue, '_public_list_info', _('Last refresh'));
         oPubListInfo.rawhtml = true;
+        oPubListInfo.depends('routing_mode', 'simple');
         oPubListInfo.cfgvalue = function () {
             const lu = pubListStat && pubListStat.last_updated;
             const cu = pubListStat && pubListStat.catalog_updated;
@@ -1031,6 +1051,7 @@ return view.extend({
         // Rendered as a single DummyValue cell so buttons sit on one row
         // (form.Button always opens a new label/widget row).
         let oPubListBtns = s.taboption('outbound_routing', form.DummyValue, '_public_list_btns', _('Actions'));
+        oPubListBtns.depends('routing_mode', 'simple');
         oPubListBtns.cfgvalue = function () {
             function mkBtn(label, fn, style) {
                 const btn = E('button', { class: 'btn cbi-button cbi-button-' + (style || 'apply') }, label);
@@ -1064,9 +1085,344 @@ return view.extend({
 
         o = s.taboption('outbound_routing', form.DynamicList, "wan_fw_tcp_ports", _("Forwarded TCP Ports"), _("Requests to these TCP Ports will be forwarded through Xray."));
         o.datatype = "portrange";
+        o.depends('routing_mode', 'simple');
 
         o = s.taboption('outbound_routing', form.DynamicList, "wan_fw_udp_ports", _("Forwarded UDP Ports"), _("Requests to these UDP Ports will be forwarded through Xray."));
         o.datatype = "portrange";
+        o.depends('routing_mode', 'simple');
+
+        // ----- AmneziaWG / Cloudflare WARP panel -----
+        // Register directly, via an Xray server (temporary SOCKS tunnel), or by key import.
+        function awgStartRegister(server) {
+            ui.showModal(_('WARP registration'), [E('p', { 'class': 'spinning' }, _('Registering at Cloudflare (may take up to a minute)…'))]);
+            callAwgRegister(server || '').then(function () {
+                const t0 = Date.now();
+                const iv = setInterval(function () {
+                    callAwgRegStatus().then(function (r) {
+                        if (!r) return;
+                        if (r.state === 'running') {
+                            if (Date.now() - t0 > 120000) {
+                                clearInterval(iv);
+                                ui.hideModal();
+                                notify(false, _('Registration timed out'));
+                            }
+                            return;
+                        }
+                        clearInterval(iv);
+                        if (r.state === 'done' && r.exit === 0) {
+                            ui.hideModal();
+                            notify(true, _('WARP registered'));
+                            window.location.reload();
+                        } else {
+                            awgFallback((((r.log || '') + '').split('\n').filter(Boolean).slice(-1)[0]) || r.state);
+                        }
+                    }, function () {});
+                }, 2000);
+            }, function (e) {
+                ui.hideModal();
+                notify(false, _('RPC error: ') + e);
+            });
+        }
+
+        function awgTunnelModal(srvs, log) {
+            const sel = E('select', { 'class': 'cbi-input-select', style: 'width:100%' },
+                srvs.map(function (v) { return E('option', { value: v['.name'] }, server_alias(v)); }));
+            const btnVia = E('button', { 'class': 'btn cbi-button cbi-button-positive' }, _('Register via this tunnel'));
+            btnVia.addEventListener('click', function (ev) {
+                ev.preventDefault();
+                ui.hideModal();
+                awgStartRegister(sel.value);
+            });
+            const btnImp = E('button', { 'class': 'btn cbi-button' }, _('Paste key file instead'));
+            btnImp.addEventListener('click', function (ev) {
+                ev.preventDefault();
+                ui.hideModal();
+                awgImportModal(log);
+            });
+            const btnNo = E('button', { 'class': 'btn' }, _('Cancel'));
+            btnNo.addEventListener('click', function (ev) { ev.preventDefault(); ui.hideModal(); });
+            ui.showModal(_('Cloudflare unreachable'), [
+                E('p', {}, [ _('Direct registration failed: '), E('em', {}, log) ]),
+                E('p', {}, _('Register through one of your Xray servers (temporary SOCKS tunnel)?')),
+                sel,
+                E('div', { 'class': 'right', style: 'margin-top:1em;display:flex;gap:0.4em;justify-content:flex-end' }, [btnNo, btnImp, btnVia]),
+            ]);
+        }
+
+        function awgImportModal(log) {
+            const ta = E('textarea', { 'class': 'cbi-input-textarea', style: 'width:100%;height:12em',
+                placeholder: _('Paste the contents of an awg-warp.conf file from the website') });
+            const btnGo = E('button', { 'class': 'btn cbi-button cbi-button-positive' }, _('Import'));
+            btnGo.addEventListener('click', function (ev) {
+                ev.preventDefault();
+                const text = ta.value.trim();
+                if (!text) return;
+                btnGo.disabled = true;
+                ui.showModal(_('Import'), [E('p', { 'class': 'spinning' }, _('Working...'))]);
+                callAwgImport(text).then(function (r) {
+                    ui.hideModal();
+                    if (r && r.code === 0) {
+                        notify(true, _('Imported'));
+                        window.location.reload();
+                    } else {
+                        notify(false, _('Import failed: ') + ((r && r.log) || ''));
+                    }
+                }, function (e) {
+                    ui.hideModal();
+                    notify(false, _('RPC error: ') + e);
+                });
+            });
+            const btnNo = E('button', { 'class': 'btn' }, _('Cancel'));
+            btnNo.addEventListener('click', function (ev) { ev.preventDefault(); ui.hideModal(); });
+            ui.showModal(_('Import AmneziaWG key'), [
+                log
+                    ? E('p', {}, [ _('Registration failed: '), E('em', {}, log) ])
+                    : E('p', {}, _('Cloudflare may be unreachable from your network. Create a key on the website and paste it (or a .conf file) below.')),
+                E('p', {}, [
+                    E('a', { href: 'https://wxpn.reina.guru/awg-warp', target: '_blank', rel: 'noopener' },
+                        _('Create a key on the website ↗')),
+                ]),
+                ta,
+                E('div', { 'class': 'right', style: 'margin-top:1em;display:flex;gap:0.4em;justify-content:flex-end' }, [btnNo, btnGo]),
+            ]);
+        }
+
+        function awgFallback(log) {
+            ui.hideModal();
+            const srvs = uci.sections(config_data, 'servers');
+            if (srvs.length > 0) awgTunnelModal(srvs, log);
+            else awgImportModal(log);
+        }
+
+        // Background opkg/apk install; poll and stream its log into the modal.
+        function awgInstallPkg() {
+            const logBox = E('pre', { style: 'max-height:16em;overflow:auto;white-space:pre-wrap;background:#222;color:#eee;border:1px solid #444;padding:0.5em;margin:0;font-size:0.9em' }, '');
+            const btnNo = E('button', { 'class': 'btn' }, _('Close'));
+            btnNo.addEventListener('click', function (ev) { ev.preventDefault(); ui.hideModal(); });
+            ui.showModal(_('Installing AmneziaWG tools'), [
+                E('p', { 'class': 'spinning' }, _('Running opkg update + install…')),
+                logBox,
+                E('div', { 'class': 'right', style: 'margin-top:0.5em' }, [btnNo]),
+            ]);
+            const scroll = function () { logBox.scrollTop = logBox.scrollHeight; };
+            callAwgPkgInstall().then(function () {
+                const t0 = Date.now();
+                const iv = setInterval(function () {
+                    callAwgPkgStatus().then(function (r) {
+                        if (!r) return;
+                        logBox.textContent = r.log || '';
+                        scroll();
+                        if (r.state === 'running') {
+                            if (Date.now() - t0 > 600000) {
+                                clearInterval(iv);
+                                ui.hideModal();
+                                notify(false, _('Install timed out'));
+                            }
+                            return;
+                        }
+                        clearInterval(iv);
+                        if (r.state === 'done' && r.exit === 0) {
+                            ui.hideModal();
+                            notify(true, _('AmneziaWG tools installed'));
+                            window.location.reload();
+                        } else {
+                            ui.showModal(_('Install failed'), [
+                                E('p', {}, _('Exit code: ') + (r.exit == null ? r.state : r.exit)),
+                                logBox,
+                                E('div', { 'class': 'right', style: 'margin-top:0.5em' }, [btnNo]),
+                            ]);
+                            scroll();
+                        }
+                    }, function () {});
+                }, 2000);
+            }, function (e) {
+                ui.hideModal();
+                notify(false, _('RPC error: ') + e);
+            });
+        }
+
+        let oAwgPanel = s.taboption('outbound_routing', form.DummyValue, '_awg_panel', _('AmneziaWG · Cloudflare WARP'));
+        oAwgPanel.depends('routing_mode', 'advanced');
+        oAwgPanel.cfgvalue = function () {
+            const missing = [];
+            if (!awgStat.awg) missing.push('amneziawg-tools');
+            let st, buttons;
+            if (missing.length > 0) {
+                st = E('div', { style: 'color:#b30000' }, _('Missing packages: %s — install them before registering.').format(missing.join(', ')));
+                const btnPkg = E('button', { 'class': 'btn cbi-button cbi-button-negative' }, _('Install AmneziaWG tools'));
+                btnPkg.addEventListener('click', function (ev) {
+                    ev.preventDefault();
+                    awgInstallPkg();
+                });
+                buttons = [btnPkg];
+            } else if (!awgStat.registered) {
+                st = E('div', {}, _('Not registered. Register a free Cloudflare WARP device, then point routing blocks at the interface.'));
+                const btnReg = E('button', { 'class': 'btn cbi-button cbi-button-apply' }, _('Register via Cloudflare WARP'));
+                btnReg.addEventListener('click', function (ev) {
+                    ev.preventDefault();
+                    if (btnReg.disabled) return;
+                    btnReg.disabled = true;
+                    awgStartRegister('');
+                });
+                const btnImp = E('button', { 'class': 'btn cbi-button' }, _('Import key / .conf'));
+                btnImp.addEventListener('click', function (ev) {
+                    ev.preventDefault();
+                    awgImportModal('');
+                });
+                buttons = [btnReg, btnImp];
+            } else {
+                st = E('div', {}, [
+                    E('strong', {}, _('Registered: ')), _('yes'),
+                    ' · ', E('strong', {}, _('interface: ')), awgStat.iface || 'awg0',
+                    ' · ', E('strong', {}, _('state: ')), awgStat.up ? _('up') : _('down'),
+                    ' · ', E('strong', {}, _('endpoint: ')), awgStat.endpoint || '—',
+                ]);
+                buttons = [];
+            }
+            return E('div', { style: 'font-size:0.95em' },
+                buttons.length > 0
+                    ? [st, E('span', { style: 'display:inline-flex;gap:0.4em;margin-top:0.4em;flex-wrap:wrap' }, buttons)]
+                    : [st]);
+        };
+
+        // ===== Advanced Routing =====
+
+
+        let oAdv = s.taboption('outbound_routing', form.SectionValue, 'access_control_routing_rule', form.GridSection, 'routing_rule', _('Routing blocks'));
+        oAdv.depends('routing_mode', 'advanced');
+        let sadv = oAdv.subsection;
+        sadv.anonymous = true;
+        sadv.addremove = true;
+        sadv.sortable = true;
+        sadv.nodescriptions = true;
+        sadv.addbtntitle = _('Add routing block');
+
+        let aoEnabled = sadv.option(form.Flag, 'enabled', _('On'));
+        aoEnabled.default = '1';
+        aoEnabled.editable = true;
+
+        let aoLabel = sadv.option(form.Value, 'label', _('Name'));
+        aoLabel.rmempty = false;
+        aoLabel.placeholder = _('e.g. Media → US');
+
+        let aoKind = sadv.option(form.ListValue, 'outbound_kind', _('Target'));
+        aoKind.value('server', _('Server'));
+        aoKind.value('awg',    _('AmneziaWG interface') + (awgReady ? '' : '  ·  ' + _('(not set up)')));
+        aoKind.value('block',  _('Block (drop)'));
+        aoKind.default = 'server';
+        aoKind.onchange = function (ev, value) {
+            if (value !== 'awg' || awgReady) return;
+            if (!awgStat.awg) {
+                notify(false, _('AmneziaWG tools are not installed. Use "Install AmneziaWG tools" in the AmneziaWG panel above.'));
+            } else {
+                notify(false, _('No AmneziaWG interface yet. Register via Cloudflare WARP (or import a key) in the AmneziaWG panel above.'));
+            }
+        };
+        aoKind.textvalue = function (sid) {
+            const kind = uci.get(config_data, sid, 'outbound_kind') || 'server';
+            if (kind === 'block') return _('Block');
+            if (kind === 'awg') {
+                if (!awgReady) return E('em', { style: 'color:#b30000' }, _('AmneziaWG (not set up)'));
+                const iface = uci.get(config_data, sid, 'outbound_iface');
+                return iface ? (_('AmneziaWG') + ': ' + iface) : E('em', {}, _('(no interface)'));
+            }
+            const srv = uci.get(config_data, sid, 'outbound_server');
+            if (!srv) return E('em', {}, _('(no server)'));
+            const sv = uci.get(config_data, srv);
+            return sv ? server_alias(sv) : srv;
+        };
+
+        let outbound_server = sadv.option(form.ListValue, 'outbound_server', _('Server'), _('Send this block’s traffic through this outbound server.'));
+        outbound_server.depends('outbound_kind', 'server');
+        outbound_server.datatype = 'uciname';
+        outbound_server.modalonly = true;
+
+        let aoIface = sadv.option(form.ListValue, 'outbound_iface', _('AmneziaWG interface'),
+            awgReady
+                ? _('Interface to send this block’s traffic through. AWG-like interfaces are listed first; awg0 is the one created by the WARP panel above.')
+                : _('Locked until AmneziaWG is set up — see the panel above.'));
+        aoIface.depends('outbound_kind', 'awg');
+        aoIface.modalonly = true;
+        aoIface.rmempty = false;
+        aoIface.default = 'awg0';
+        if (awgReady) {
+            for (const n of awgIfaceCandidates) aoIface.value(n, n);
+        } else {
+            aoIface.value('', _('— locked: set up AmneziaWG first (panel above) —'));
+            aoIface.validate = function (sid, value) {
+                if (!value) return true;
+                return _('Locked: install the AmneziaWG tools and create the interface first (panel above)');
+            };
+        }
+        // Keep a value saved on an older config visible even if the device is gone.
+        if (awgReady) {
+            for (const b of uci.sections(config_data, 'routing_rule')) {
+                const v = b.outbound_iface;
+                if (v && awgIfaceCandidates.indexOf(v) < 0) aoIface.value(v, v + '  ·  ' + _('(not present)'));
+            }
+        }
+
+        const mkBlockList = function (optname, title, descr, itemValidator) {
+            const opt = sadv.option(form.TextValue, optname, title, descr);
+            opt.rows = 6;
+            opt.monospace = true;
+            opt.optional = true;
+            opt.modalonly = true;
+            opt.cfgvalue = function (sid) {
+                const raw = uci.get(shared.variant, sid, optname + '_text');
+                if (typeof raw === 'string' && raw.length > 0) return raw;
+                return listToText(sid, optname);
+            };
+            opt.write = function (sid, value) {
+                const items = textToList(value);
+                if (typeof value === 'string' && value.replace(/\s+/g, '').length > 0) {
+                    uci.set(shared.variant, sid, optname + '_text', value);
+                } else {
+                    uci.unset(shared.variant, sid, optname + '_text');
+                }
+                if (items.length === 0) uci.unset(shared.variant, sid, optname);
+                else uci.set(shared.variant, sid, optname, items);
+            };
+            opt.remove = function (sid) {
+                uci.unset(shared.variant, sid, optname);
+                uci.unset(shared.variant, sid, optname + '_text');
+            };
+            if (itemValidator) {
+                opt.validate = function (sid, value) {
+                    if (!value) return true;
+                    for (const item of textToList(value)) {
+                        const r = itemValidator(sid, item);
+                        if (r !== true) return r;
+                    }
+                    return true;
+                };
+            }
+            return opt;
+        };
+        mkBlockList('domains', _('Domains'), DOMAIN_HINT);
+        mkBlockList('ips',     _('IPs / CIDRs'), IP_HINT, geoip_or_ipaddr);
+
+        let aoLists = sadv.option(form.MultiValue, 'public_lists', _('Presets'),
+            _('Curated lists from the catalog, applied to this block only.'));
+        aoLists.modalonly = true;
+        aoLists.placeholder = _('-- nothing selected --');
+        const advOptionMap = {};
+        for (const it of catalogItems) {
+            const id = String(it && it.id || '');
+            if (!id) continue;
+            advOptionMap[id] = String(it.name || id) + (it.description ? (' · ' + it.description) : '');
+        }
+        for (const b of uci.sections(config_data, 'routing_rule')) {
+            const sel = b.public_lists;
+            for (const id of (Array.isArray(sel) ? sel : (sel ? [sel] : []))) {
+                if (id && !advOptionMap[id]) advOptionMap[id] = id + '  ·  ' + _('(not in catalog)');
+            }
+        }
+        const advSortedIds = Object.keys(advOptionMap).sort((a, b) => a.localeCompare(b));
+        for (const id of advSortedIds) aoLists.value(id, advOptionMap[id]);
+        if (advSortedIds.length === 0) {
+            aoLists.value('', _('(catalog empty — use "Refresh catalog" in Simple mode)'));
+        }
 
         o = s.taboption('outbound_routing', form.SectionValue, "access_control_manual_tproxy", form.GridSection, 'manual_tproxy', _('Manual Transparent Proxy'), _('Compared to iptables REDIRECT, Xray could do NAT46 / NAT64 (for example accessing IPv6 only sites). See <a href="https://github.com/v2ray/v2ray-core/issues/2233">FakeDNS</a> for details.'));
 
@@ -1545,7 +1901,7 @@ return view.extend({
         };
 
         const servers = uci.sections(config_data, "servers");
-        for (let selection of [destination, fake_dns_forward_server_tcp, fake_dns_forward_server_udp, balancer_servers, bridge_upstream, force_forward_server_tcp, force_forward_server_udp, dialer_proxy]) {
+        for (let selection of [destination, fake_dns_forward_server_tcp, fake_dns_forward_server_udp, balancer_servers, bridge_upstream, force_forward_server_tcp, force_forward_server_udp, dialer_proxy, outbound_server]) {
             if (servers.length == 0) {
                 selection.value("direct", _("No server configured"));
                 selection.readonly = true;

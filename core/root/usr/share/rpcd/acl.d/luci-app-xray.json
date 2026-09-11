@@ -18,7 +18,10 @@
                     "public_list_status",
                     "community_catalog_list",
                     "ping_server",
-                    "ping_all"
+                    "ping_all",
+                    "awg_status",
+                    "awg_register_status",
+                    "awg_pkg_install_status"
                 ]
             }
         },
@@ -42,7 +45,10 @@
                     "core_install",
                     "geo_update_now",
                     "public_list_update_now",
-                    "community_catalog_refresh"
+                    "community_catalog_refresh",
+                    "awg_warp_register",
+                    "awg_import",
+                    "awg_pkg_install"
                 ]
             }
         }

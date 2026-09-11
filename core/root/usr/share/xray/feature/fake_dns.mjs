@@ -23,7 +23,7 @@ export function fake_dns_domains(fakedns, forwarded_extra, bypassed_extra) {
     ];
 };
 
-export function fake_dns_rules(fakedns, forwarded_extra, bypassed_extra) {
+export function fake_dns_rules(fakedns, forwarded_extra, bypassed_extra, advanced) {
     let result = [];
     for (let f in fakedns) {
         push(result, {
@@ -48,7 +48,7 @@ export function fake_dns_rules(fakedns, forwarded_extra, bypassed_extra) {
             outboundTag: "direct"
         });
     }
-    if (forwarded_extra && length(forwarded_extra) > 0) {
+    if (!advanced && forwarded_extra && length(forwarded_extra) > 0) {
         push(result, {
             type: "field",
             inboundTag: ["tproxy_tcp_inbound_f4", "tproxy_tcp_inbound_f6"],

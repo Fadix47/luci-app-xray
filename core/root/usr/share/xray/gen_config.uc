@@ -58,7 +58,12 @@ function inbounds(proxy, config, extra_inbound) {
     return i;
 }
 
-function outbounds(proxy, config, manual_tproxy, bridge, extra_inbound, fakedns) {
+// Outbound tag for a block targeting a single server; last `:`-token is the section name (built by outbounds() like balancers).
+function advanced_server_tag(server_id) {
+    return `advanced_server:${server_id}`;
+}
+
+function outbounds(proxy, config, manual_tproxy, bridge, extra_inbound, fakedns, routing_rules) {
     let result = [
         blackhole_outbound(),
         direct_outbound("direct", null, false),
@@ -96,6 +101,30 @@ function outbounds(proxy, config, manual_tproxy, bridge, extra_inbound, fakedns)
             }
         }
     }
+    // Advanced Routing: one outbound per server-target block, deduped by server;
+    // AWG blocks get a freedom outbound per interface with fwmark 166 (table 166 -> dev awg).
+    let awg_ifaces = {};
+    if (proxy["routing_mode"] == "advanced") {
+        for (let r in (routing_rules || [])) {
+            if (r["enabled"] == "0") continue;
+            if (r["outbound_kind"] == "server" && r["outbound_server"]) {
+                outbound_balancers_all[advanced_server_tag(r["outbound_server"])] = true;
+            }
+            if (r["outbound_kind"] == "awg" && r["outbound_iface"]) {
+                awg_ifaces[r["outbound_iface"]] = true;
+            }
+        }
+    }
+    for (let i in keys(awg_ifaces)) {
+        push(result, {
+            protocol: "freedom",
+            tag: `advanced_awg:${i}`,
+            settings: { domainStrategy: "UseIPv4" },
+            streamSettings: {
+                sockopt: { mark: 166 }
+            }
+        });
+    }
     for (let i in keys(outbound_balancers_all)) {
         // Tag is `<prefix>@balancer_outbound:<section_name>`; last token is the section.
         let parts = split(i, ":");
@@ -105,7 +134,8 @@ function outbounds(proxy, config, manual_tproxy, bridge, extra_inbound, fakedns)
     return result;
 }
 
-function rules(proxy, bridge, manual_tproxy, extra_inbound, fakedns) {
+function rules(proxy, bridge, manual_tproxy, extra_inbound, fakedns, routing_rules) {
+    const advanced = proxy["routing_mode"] == "advanced";
     const geoip_existence = access("/usr/share/xray/geoip.dat") || false;
     const tproxy_tcp_inbound_v4_tags = ["tproxy_tcp_inbound_v4"];
     const tproxy_udp_inbound_v4_tags = ["tproxy_udp_inbound_v4"];
@@ -118,11 +148,51 @@ function rules(proxy, bridge, manual_tproxy, extra_inbound, fakedns) {
     const extra_inbound_global_socks5_tags = extra_inbound_global_tags["socks5"] || [];
     const built_in_tcp_inbounds = [...tproxy_tcp_inbound_v4_tags, ...extra_inbound_global_tcp_tags, ...extra_inbound_global_http_tags, ...extra_inbound_global_socks5_tags, "socks_inbound", "https_inbound", "http_inbound"];
     const built_in_udp_inbounds = [...tproxy_udp_inbound_v4_tags, ...extra_inbound_global_udp_tags, "dns_conf_inbound"];
+
+    // Advanced Routing: one override rule per block, before the balancer catch-all; `direct` blocks need none (bypassed at ingress).
+    let advanced_block_rules = [];
+    if (advanced) {
+        const fakedns_inbounds = ["tproxy_tcp_inbound_f4", "tproxy_tcp_inbound_f6", "tproxy_udp_inbound_f4", "tproxy_udp_inbound_f6"];
+        const ip_inbounds = uniq([...built_in_tcp_inbounds, ...built_in_udp_inbounds, ...tproxy_tcp_inbound_v6_tags, ...tproxy_udp_inbound_v6_tags]);
+        for (let r in (routing_rules || [])) {
+            if (r["enabled"] == "0") continue;
+            let outbound_tag = null;
+            if (r["outbound_kind"] == "server" && r["outbound_server"]) {
+                outbound_tag = advanced_server_tag(r["outbound_server"]);
+            } else if (r["outbound_kind"] == "awg" && r["outbound_iface"]) {
+                outbound_tag = `advanced_awg:${r["outbound_iface"]}`;
+            } else if (r["outbound_kind"] == "block") {
+                outbound_tag = "blackhole_outbound";
+            } else {
+                continue;
+            }
+            const domains = r["domains"] || [];
+            const ips = r["ips"] || [];
+            if (length(domains) > 0) {
+                push(advanced_block_rules, {
+                    type: "field",
+                    inboundTag: fakedns_inbounds,
+                    outboundTag: outbound_tag,
+                    domain: domains
+                });
+            }
+            if (length(ips) > 0) {
+                push(advanced_block_rules, {
+                    type: "field",
+                    inboundTag: ip_inbounds,
+                    outboundTag: outbound_tag,
+                    ip: ips
+                });
+            }
+        }
+    }
+
     let result = [
         // Routing-tab forward/bypass domains ride FakeDNS sniffing inbounds.
         ...fake_dns_rules(fakedns,
                           secure_domain_rules(proxy),
-                          fast_domain_rules(proxy)),
+                          fast_domain_rules(proxy),
+                          advanced),
         ...manual_tproxy_rules(manual_tproxy),
         ...extra_inbound_rules(extra_inbound),
         ...system_route_rules(proxy),
@@ -135,6 +205,7 @@ function rules(proxy, bridge, manual_tproxy, extra_inbound, fakedns) {
             outboundTag: "direct",
             ip: ["geoip:private"]
         }] : []),
+        ...advanced_block_rules,
         {
             type: "field",
             inboundTag: tproxy_tcp_inbound_v6_tags,
@@ -157,7 +228,7 @@ function rules(proxy, bridge, manual_tproxy, extra_inbound, fakedns) {
         },
     ];
     if (proxy["tproxy_sniffing"] == "1") {
-        if (length(secure_domain_rules(proxy)) > 0) {
+        if (!advanced && length(secure_domain_rules(proxy)) > 0) {
             splice(result, 0, 0, {
                 type: "field",
                 inboundTag: [...tproxy_tcp_inbound_v4_tags, ...extra_inbound_global_tcp_tags],
@@ -235,12 +306,13 @@ function gen_config() {
     const fakedns = filter(values(config), v => v[".type"] == "fakedns") || [];
     const extra_inbound = filter(values(config), v => v[".type"] == "extra_inbound") || [];
     const manual_tproxy = filter(values(config), v => v[".type"] == "manual_tproxy") || [];
+    const routing_rules = filter(values(config), v => v[".type"] == "routing_rule") || [];
 
     const general = filter(values(config), k => k[".type"] == "general")[0] || {};
     const custom_configuration_hook = loadstring(general["custom_configuration_hook"] || "return i => i;")();
     let result = {
         inbounds: inbounds(general, config, extra_inbound),
-        outbounds: outbounds(general, config, manual_tproxy, bridge, extra_inbound, fakedns),
+        outbounds: outbounds(general, config, manual_tproxy, bridge, extra_inbound, fakedns, routing_rules),
         dns: dns_conf(general, config, manual_tproxy, fakedns),
         fakedns: fake_dns_conf(general),
         api: api_conf(general),
@@ -253,7 +325,7 @@ function gen_config() {
         observatory: observatory(general, manual_tproxy),
         routing: {
             domainStrategy: general["routing_domain_strategy"] || "AsIs",
-            rules: rules(general, bridge, manual_tproxy, extra_inbound, fakedns),
+            rules: rules(general, bridge, manual_tproxy, extra_inbound, fakedns, routing_rules),
             balancers: balancers(general, extra_inbound, fakedns)
         }
     };

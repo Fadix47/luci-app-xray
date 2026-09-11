@@ -126,15 +126,18 @@ flush_dnsmasq() {
 }
 
 create_when_enable() {
-    [ "$(uci_get_by_type general transparent_proxy_enable)" == "1" ] || return 0
     logger -st xray[$$] -p4 "Setting dnsmasq and firewall for transparent proxy..."
     setup_dnsmasq
     setup_firewall
+    [ -x /usr/share/xray/sub/awg_warp.sh ] && /usr/share/xray/sub/awg_warp.sh up >/dev/null 2>&1
     logger -st xray[$$] -p4 $(ucode /usr/share/xray/default_gateway.uc)
 }
 
 flush_when_disable() {
     logger -st xray[$$] -p4 "Resetting dnsmasq and firewall configurations..."
+    if [ "${AWG_KEEP:-0}" != "1" ]; then
+        [ -x /usr/share/xray/sub/awg_warp.sh ] && /usr/share/xray/sub/awg_warp.sh down >/dev/null 2>&1
+    fi
     flush_dnsmasq
     flush_firewall
 }
@@ -144,20 +147,17 @@ start_service() {
     mkdir -p /var/run /var/etc/xray
     local xray_bin=$(uci_get_by_type general xray_bin)
     command -v ${xray_bin} > /dev/null 2>&1 || return 1
-    # Honor geo_disabled: wipe data files/cache and let cron_install update entries.
     local geo_disabled=$(uci_get_by_type general geo_disabled)
     if [ "${geo_disabled}" = "1" ]; then
         rm -f /usr/share/xray/geoip.dat /usr/share/xray/geosite.dat /tmp/xray_geoip_cache.json
     fi
     /usr/share/xray/sub/cron_install.sh >/dev/null 2>&1
-    # Background bootstrap — --bootstrap is a no-op when caches exist, so hot
-    # reloads don't spam GitHub.
     if [ -n "$(uci -q get xray_core.@general[0].community_lists)" ]; then
         ( /usr/share/xray/sub/public_list_update.sh --bootstrap >/dev/null 2>&1 ) &
     fi
     gen_config_file
     start_xray ${xray_bin}
-    create_when_enable || flush_when_disable
+    create_when_enable
 }
 
 stop_service() {
@@ -165,8 +165,14 @@ stop_service() {
 }
 
 reload_service() {
+    if [ "$(uci -q get xray_core.awg0.enabled 2>/dev/null)" = "1" ] && \
+       ip link show dev awg0 >/dev/null 2>&1; then
+        AWG_KEEP=1
+        export AWG_KEEP
+    fi
     stop
     start
+    unset AWG_KEEP
 }
 
 service_triggers() {

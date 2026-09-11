@@ -137,10 +137,9 @@ fetch_one() {
     return 0
 }
 
-# Drop cache files whose ids are no longer in `community_lists`.
 prune_orphans() {
     local selected
-    selected=" $(uci -q get xray_core.@general[0].community_lists | tr ' \t,;' '    ') "
+    selected=" $(selected_ids) "
     for f in "${CACHE_DIR}"/*.domains "${CACHE_DIR}"/*.subnets; do
         [ -e "${f}" ] || continue
         local base="${f##*/}"
@@ -233,8 +232,14 @@ catalog_age_seconds() {
 
 # Selected ids space-separated; iterate via `for` (not `while read`) so NEED_RELOAD propagates.
 selected_ids() {
-    uci -q get xray_core.@general[0].community_lists \
-        | tr ',\t;' '   '
+    {
+        uci -q get xray_core.@general[0].community_lists
+        local idx=0
+        while uci -q get "xray_core.@routing_rule[${idx}]" >/dev/null 2>&1; do
+            uci -q get "xray_core.@routing_rule[${idx}].public_lists"
+            idx=$((idx + 1))
+        done
+    } | tr ',\t;\n' '    '
 }
 
 MODE=full

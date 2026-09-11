@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-xray
-PKG_VERSION:=4.0.0
+PKG_VERSION:=4.1.3
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MPLv2
@@ -15,7 +15,7 @@ define Package/$(PKG_NAME)
 	SECTION:=Custom
 	CATEGORY:=Extra packages
 	TITLE:=LuCI Support for Xray
-	DEPENDS:=firewall4 +kmod-nft-tproxy +luci-base +dnsmasq +ca-bundle +wget-ssl +unzip +jq +coreutils-base64 +ucode +ucode-mod-uci +ucode-mod-fs +ucode-mod-digest +gawk
+	DEPENDS:=firewall4 +kmod-nft-tproxy +luci-base +dnsmasq +ca-bundle +wget-ssl +curl +unzip +jq +coreutils-base64 +ucode +ucode-mod-uci +ucode-mod-fs +ucode-mod-digest +gawk
 	PKGARCH:=all
 endef
 
@@ -178,6 +178,8 @@ endif
 	$(INSTALL_BIN) ./root/usr/share/xray/sub/cron_install.sh $(1)/usr/share/xray/sub/cron_install.sh
 	$(INSTALL_BIN) ./root/usr/share/xray/sub/geo_update.sh $(1)/usr/share/xray/sub/geo_update.sh
 	$(INSTALL_BIN) ./root/usr/share/xray/sub/public_list_update.sh $(1)/usr/share/xray/sub/public_list_update.sh
+	$(INSTALL_BIN) ./root/usr/share/xray/sub/awg_warp.sh $(1)/usr/share/xray/sub/awg_warp.sh
+	$(INSTALL_BIN) ./root/usr/share/xray/sub/awg_proxy.uc $(1)/usr/share/xray/sub/awg_proxy.uc
 	$(INSTALL_BIN) ./root/usr/share/xray/sub/geoip_refresh.uc $(1)/usr/share/xray/sub/geoip_refresh.uc
 	$(INSTALL_BIN) ./root/usr/share/xray/sub/ping.sh $(1)/usr/share/xray/sub/ping.sh
 	$(INSTALL_BIN) ./root/usr/share/xray/sub/ping_batch.sh $(1)/usr/share/xray/sub/ping_batch.sh

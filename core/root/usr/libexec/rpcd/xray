@@ -34,7 +34,13 @@ main() {
     "community_catalog_list": {},
     "community_catalog_refresh": {},
     "ping_server": {"sub_id": "str", "method": "str", "target": "str"},
-    "ping_all":    {"method": "str", "target": "str", "sids": ["str"]}
+    "ping_all":    {"method": "str", "target": "str", "sids": ["str"]},
+    "awg_status": {},
+    "awg_warp_register": {"server": "str"},
+    "awg_register_status": {},
+    "awg_import": {"text": "str"},
+    "awg_pkg_install": {},
+    "awg_pkg_install_status": {}
 }
 EOF
             ;;
@@ -264,6 +270,99 @@ EOF
                     arr=$(/usr/share/xray/sub/ping_batch.sh "${method:-head}" "${target:-http://www.gstatic.com/generate_204}" ${sids})
                     [ -z "${arr}" ] && arr="[]"
                     printf '{"results":%s}\n' "${arr}"
+                    ;;
+                awg_status)
+                    /usr/share/xray/sub/awg_warp.sh status 2>/dev/null || printf '{"awg":0,"awg_quick":0,"curl":0,"registered":0,"enabled":0,"up":0,"iface":"awg0","mark":166,"endpoint":null}\n'
+                    ;;
+                awg_warp_register)
+                    # Background job - registration
+                    input=$(cat)
+                    server=$(echo "${input}" | jsonfilter -e '@.server' 2>/dev/null)
+                    if [ -s /tmp/xray_awg_reg.pid ]; then
+                        old_pid=$(cat /tmp/xray_awg_reg.pid)
+                        if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+                            printf '{"code":2,"error":"registration already running","pid":%d}\n' "${old_pid}"
+                            return
+                        fi
+                    fi
+                    rm -f /tmp/xray_awg_reg.log /tmp/xray_awg_reg.exit /tmp/xray_awg_reg.pid
+                    setsid sh -c '
+                        /usr/share/xray/sub/awg_warp.sh register "$1" > /tmp/xray_awg_reg.log 2>&1
+                        ec=$?
+                        echo "${ec}" > /tmp/xray_awg_reg.exit
+                        [ "${ec}" -eq 0 ] && /etc/init.d/xray_core reload >/dev/null 2>&1
+                        rm -f /tmp/xray_awg_reg.pid
+                    ' _ "${server:-}" </dev/null >/dev/null 2>&1 &
+                    reg_pid=$!
+                    echo "${reg_pid}" > /tmp/xray_awg_reg.pid
+                    printf '{"code":0,"started":true,"pid":%d}\n' "${reg_pid}"
+                    ;;
+                awg_register_status)
+                    state="idle"
+                    exit_code="null"
+                    log=""
+                    [ -s /tmp/xray_awg_reg.log ] && log=$(tail -c 4096 /tmp/xray_awg_reg.log)
+                    if [ -s /tmp/xray_awg_reg.exit ]; then
+                        state="done"
+                        exit_code=$(cat /tmp/xray_awg_reg.exit)
+                    elif [ -s /tmp/xray_awg_reg.pid ]; then
+                        pid=$(cat /tmp/xray_awg_reg.pid)
+                        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+                            state="running"
+                        else
+                            state="dead"
+                        fi
+                    fi
+                    printf '{"state":"%s","exit":%s,"log":%s}\n' "${state}" "${exit_code}" "$(printf '%s' "${log}" | jq -Rs .)"
+                    ;;
+                awg_import)
+                    input=$(cat)
+                    text=$(echo "${input}" | jsonfilter -e '@.text')
+                    if [ -z "${text}" ]; then
+                        printf '{"code":1,"error":"missing text"}\n'
+                        return
+                    fi
+                    out=$(printf '%s' "${text}" | /usr/share/xray/sub/awg_warp.sh import 2>&1)
+                    ec=$?
+                    [ "${ec}" -eq 0 ] && /etc/init.d/xray_core reload >/dev/null 2>&1
+                    printf '{"code":%d,"log":%s}\n' "${ec}" "$(printf '%s' "${out}" | jq -Rs .)"
+                    ;;
+                awg_pkg_install)
+                    # On-demand package install; background job (opkg may be slow).
+                    if [ -s /tmp/xray_awg_pkg.pid ]; then
+                        old_pid=$(cat /tmp/xray_awg_pkg.pid)
+                        if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+                            printf '{"code":2,"error":"install already running","pid":%d}\n' "${old_pid}"
+                            return
+                        fi
+                    fi
+                    rm -f /tmp/xray_awg_pkg.log /tmp/xray_awg_pkg.exit /tmp/xray_awg_pkg.pid
+                    setsid sh -c '
+                        /usr/share/xray/sub/awg_warp.sh install
+                        echo $? > /tmp/xray_awg_pkg.exit
+                        rm -f /tmp/xray_awg_pkg.pid
+                    ' </dev/null > /tmp/xray_awg_pkg.log 2>&1 &
+                    pkg_pid=$!
+                    echo "${pkg_pid}" > /tmp/xray_awg_pkg.pid
+                    printf '{"code":0,"started":true,"pid":%d}\n' "${pkg_pid}"
+                    ;;
+                awg_pkg_install_status)
+                    state="idle"
+                    exit_code="null"
+                    log=""
+                    [ -s /tmp/xray_awg_pkg.log ] && log=$(tail -c 8192 /tmp/xray_awg_pkg.log)
+                    if [ -s /tmp/xray_awg_pkg.exit ]; then
+                        state="done"
+                        exit_code=$(cat /tmp/xray_awg_pkg.exit)
+                    elif [ -s /tmp/xray_awg_pkg.pid ]; then
+                        pid=$(cat /tmp/xray_awg_pkg.pid)
+                        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+                            state="running"
+                        else
+                            state="dead"
+                        fi
+                    fi
+                    printf '{"state":"%s","exit":%s,"log":%s}\n' "${state}" "${exit_code}" "$(printf '%s' "${log}" | jq -Rs .)"
                     ;;
                 geo_status)
                     geoip_size=0; geoip_mtime=0

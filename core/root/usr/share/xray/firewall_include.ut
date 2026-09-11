@@ -9,10 +9,21 @@
     const config = load_config();
     const general = config[filter(keys(config), k => config[k][".type"] == "general")[0]];
     const general_mark = general.mark || 255;
-    const tcp4_enabled = length(general.tcp_balancer_v4 || []) > 0;
-    const udp4_enabled = length(general.udp_balancer_v4 || []) > 0;
-    const tcp6_enabled = length(general.tcp_balancer_v6 || []) > 0;
-    const udp6_enabled = length(general.udp_balancer_v6 || []) > 0;
+    let advanced_fw_block = false;
+    if (general["routing_mode"] == "advanced") {
+        for (let k in keys(config)) {
+            let b = config[k];
+            if (b[".type"] != "routing_rule") continue;
+            if (b["enabled"] == "0") continue;
+            if (b["outbound_kind"] == "direct") continue;
+            advanced_fw_block = true;
+            break;
+        }
+    }
+    const tcp4_enabled = length(general.tcp_balancer_v4 || []) > 0 || advanced_fw_block;
+    const udp4_enabled = length(general.udp_balancer_v4 || []) > 0 || advanced_fw_block;
+    const tcp6_enabled = length(general.tcp_balancer_v6 || []) > 0 || advanced_fw_block;
+    const udp6_enabled = length(general.udp_balancer_v6 || []) > 0 || advanced_fw_block;
     const uids_direct = uniq(general.uids_direct || []);
     const gids_direct = uniq(general.gids_direct || []);
     let wan_bp_dns = dns_direct_servers(config);
@@ -45,6 +56,16 @@
         return sprintf("%s", general.firewall_priority);
     }();
     const fakedns = map(filter(keys(config), k => config[k][".type"] == "fakedns") || [], k => config[k]);
+    const awg_sec = config["awg0"];
+    let awg_ep_ip = null;
+    let awg_ep_port = null;
+    if (awg_sec && awg_sec.endpoint && index(awg_sec.endpoint, ":") != -1) {
+        const awg_ep = split(awg_sec.endpoint, ":");
+        if (length(awg_ep) == 2 && match(awg_ep[0], /^[0-9.]+$/) && match(awg_ep[1], /^[0-9]+$/)) {
+            awg_ep_ip = awg_ep[0];
+            awg_ep_port = awg_ep[1];
+        }
+    }
     // FakeDNS pool rules must also fire when only Routing-tab domain lists exist,
     // since those piggy-back on the FakeDNS pipeline.
     const fakedns_active = length(fakedns) > 0
@@ -447,6 +468,9 @@
         ip6 nexthdr tcp ether saddr @tp_spec_sm6_bp {{ counter }} accept comment "Xray per-device disable tproxy TCP6 (incl. FakeDNS)"
         ip6 nexthdr udp ether saddr @tp_spec_sm6_bp {{ counter }} accept comment "Xray per-device disable tproxy UDP6 (incl. FakeDNS)"
 {% endif %}
+{% if (awg_ep_ip): %}
+        ip protocol udp ip daddr {{ awg_ep_ip }} udp dport {{ awg_ep_port }} {{ counter }} accept comment "Xray AmneziaWG endpoint bypass"
+{% endif %}
         {{ counter }} jump tp_spec_lan_mf comment "Xray FakeDNS / manual transparent proxy"
 {% if (length(general.bypass_ifaces_v4 || []) > 0): %}
         ip protocol tcp iifname { "{{ join('", "', general.bypass_ifaces_v4) }}" } {{ counter }} accept
@@ -507,12 +531,16 @@
     }
 
     chain tp_spec_wan_ac {
+{% if (awg_ep_ip): %}
+        ip protocol udp ip daddr {{ awg_ep_ip }} udp dport {{ awg_ep_port }} {{ counter }} accept comment "Xray AmneziaWG endpoint bypass"
+{% endif %}
         ip protocol tcp mark 0x000000fc {{ counter }} {{ dynamic_direct_tcp4 }} accept comment "Xray direct outbound TCP4"
         ip protocol udp mark 0x000000fc {{ counter }} {{ dynamic_direct_udp4 }} accept comment "Xray direct outbound UDP4"
         ip6 nexthdr tcp mark 0x000000fc {{ counter }} {{ dynamic_direct_tcp6 }} accept comment "Xray direct outbound TCP6"
         ip6 nexthdr udp mark 0x000000fc {{ counter }} {{ dynamic_direct_udp6 }} accept comment "Xray direct outbound UDP6"
         meta mark 0x000000fd {{ counter }} accept comment "Xray transparent proxy outbound"
         meta mark 0x000000fe {{ counter }} accept comment "Xray non-IP DNS query outbound"
+        meta mark 0x000000a6 {{ counter }} accept comment "Xray AmneziaWG outbound (policy routed via routing table 166)"
         meta mark {{ sprintf("0x%08x", general_mark) }} {{ counter }} accept comment "Xray specified mark {{ general_mark }} outbound"
         {{ counter }} jump tp_spec_lan_mf
 {% if (!tcp4_enabled): %}

@@ -41,6 +41,21 @@ build_default_ua() {
 
 [ -z "${UA}" ] && UA=$(build_default_ua)
 
+sanitize_header() {
+    printf '%s' "${1}" | sed -e 's/[^A-Za-z0-9._-]/-/g' -e 's/--*/-/g' -e 's/^-//' -e 's/-$//'
+}
+DEVICE_OS=$( . /etc/openwrt_release 2>/dev/null; printf '%s' "${DISTRIB_ID}" )
+DEVICE_VER_OS=$( . /etc/openwrt_release 2>/dev/null; printf '%s' "${DISTRIB_RELEASE}" )
+DEVICE_MODEL=''
+[ -r /tmp/sysinfo/model ] && DEVICE_MODEL=$(head -n1 /tmp/sysinfo/model 2>/dev/null)
+[ -z "${DEVICE_MODEL}" ] && [ -r /tmp/sysinfo/board_name ] && DEVICE_MODEL=$(head -n1 /tmp/sysinfo/board_name 2>/dev/null)
+DEVICE_OS=$(sanitize_header "${DEVICE_OS}")
+DEVICE_VER_OS=$(sanitize_header "${DEVICE_VER_OS}")
+DEVICE_MODEL=$(sanitize_header "${DEVICE_MODEL}")
+[ -z "${DEVICE_OS}" ]      && DEVICE_OS='OpenWrt'
+[ -z "${DEVICE_VER_OS}" ]  && DEVICE_VER_OS='unknown'
+[ -z "${DEVICE_MODEL}" ]   && DEVICE_MODEL='unknown'
+
 # Stable 32-char HWID from MAC + board + release (reproducible across reboots).
 compute_hwid() {
     local mac='' iface board release seed
@@ -79,8 +94,11 @@ esac
 set --
 set -- "$@" "--header=User-Agent: ${UA}"
 [ -n "${HWID}" ] && set -- "$@" "--header=X-Hwid: ${HWID}"
+set -- "$@" "--header=x-device-os: ${DEVICE_OS}"
+set -- "$@" "--header=x-ver-os: ${DEVICE_VER_OS}"
+set -- "$@" "--header=x-device-model: ${DEVICE_MODEL}"
 
-log "GET ${URL} (UA=${UA}$([ -n "${HWID}" ] && echo " X-Hwid=${HWID}"))"
+log "GET ${URL} (UA=${UA}$([ -n "${HWID}" ] && echo " X-Hwid=${HWID}"), device=${DEVICE_OS}/${DEVICE_VER_OS}/${DEVICE_MODEL})"
 
 # -S forces server-response headers onto stderr; we DON'T pass -q so transport
 # errors show up there too. stderr is captured into ${HEADERS}.
