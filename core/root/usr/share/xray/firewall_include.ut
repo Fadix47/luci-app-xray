@@ -643,7 +643,7 @@
 {% endif %}
 
     chain tp_spec_lan_fw {
-        {{ counter }} mark set 0x000000fb accept
+        ct direction original {{ counter }} mark set 0x000000fb accept
     }
 
 {% if (fakedns_active): %}
