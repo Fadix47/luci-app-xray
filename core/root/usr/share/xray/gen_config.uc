@@ -115,6 +115,15 @@ function outbounds(proxy, config, manual_tproxy, bridge, extra_inbound, fakedns,
             }
         }
     }
+    if (proxy["dns_over_proxy"] == "1" && proxy["dns_over_proxy_target"]) {
+        const dop = split(proxy["dns_over_proxy_target"], ":");
+        if (dop[0] == "server" && dop[1]) {
+            outbound_balancers_all[advanced_server_tag(dop[1])] = true;
+        }
+        if (dop[0] == "awg" && dop[1]) {
+            awg_ifaces[dop[1]] = true;
+        }
+    }
     for (let i in keys(awg_ifaces)) {
         push(result, {
             protocol: "freedom",
@@ -168,21 +177,34 @@ function rules(proxy, bridge, manual_tproxy, extra_inbound, fakedns, routing_rul
             }
             const domains = r["domains"] || [];
             const ips = r["ips"] || [];
-            if (length(domains) > 0) {
-                push(advanced_block_rules, {
-                    type: "field",
-                    inboundTag: fakedns_inbounds,
-                    outboundTag: outbound_tag,
-                    domain: domains
-                });
+            const network = (r["network"] == "tcp" || r["network"] == "udp") ? r["network"] : null;
+            let port_entries = [null];
+            if (r["ports"] != null && r["ports"] != "") {
+                port_entries = map(filter(split(r["ports"], ","), p => trim(p) != ""), p => trim(p));
             }
-            if (length(ips) > 0) {
-                push(advanced_block_rules, {
-                    type: "field",
-                    inboundTag: ip_inbounds,
-                    outboundTag: outbound_tag,
-                    ip: ips
-                });
+            for (let pv in port_entries) {
+                if (length(domains) > 0) {
+                    const rule = {
+                        type: "field",
+                        inboundTag: fakedns_inbounds,
+                        outboundTag: outbound_tag,
+                        domain: domains
+                    };
+                    if (network) rule["network"] = network;
+                    if (pv) rule["port"] = pv;
+                    push(advanced_block_rules, rule);
+                }
+                if (length(ips) > 0) {
+                    const rule = {
+                        type: "field",
+                        inboundTag: ip_inbounds,
+                        outboundTag: outbound_tag,
+                        ip: ips
+                    };
+                    if (network) rule["network"] = network;
+                    if (pv) rule["port"] = pv;
+                    push(advanced_block_rules, rule);
+                }
             }
         }
     }

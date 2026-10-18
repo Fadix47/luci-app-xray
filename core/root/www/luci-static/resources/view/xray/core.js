@@ -999,6 +999,21 @@ return view.extend({
         oRoutingMode.default = 'simple';
         oRoutingMode.rmempty = false;
 
+        let oDnsHijack = s.taboption('outbound_routing', form.Flag, 'dns_over_proxy', _('DNS over PROXY'),
+            _('Resolve via the DNS servers from the <b>DNS Servers</b> tab through the proxy (their queries are tunneled instead of going direct).'));
+        oDnsHijack.rmempty = false;
+
+        let oDopTarget = s.taboption('outbound_routing', form.ListValue, 'dns_over_proxy_target', _('Proxy DNS through:'),
+            _('Where to tunnel DNS server queries. Default: the Servers pool from General Settings.'));
+        oDopTarget.depends('dns_over_proxy', '1');
+        oDopTarget.value('', _('Servers pool (General Settings)'));
+        for (const v of uci.sections(config_data, 'servers')) {
+            oDopTarget.value(`server:${v['.name']}`, server_alias(v));
+        }
+        if (awgReady) {
+            oDopTarget.value('awg:awg0', _('AmneziaWG') + ': awg0');
+        }
+
         // ===== Public lists (Routing tab) =====
         // Multi-select over the GitHub catalog; fetcher caches selected ids and prunes orphans.
         const catalogItems = Array.isArray(catalog.items) ? catalog.items : [];
@@ -1401,6 +1416,32 @@ return view.extend({
         };
         mkBlockList('domains', _('Domains'), DOMAIN_HINT);
         mkBlockList('ips',     _('IPs / CIDRs'), IP_HINT, geoip_or_ipaddr);
+
+        let aoNetwork = sadv.option(form.ListValue, 'network', _('Protocol'),
+            _('Limit this block to TCP or UDP only. Default: both.'));
+        aoNetwork.value('both', _('TCP + UDP'));
+        aoNetwork.value('tcp',  _('TCP only'));
+        aoNetwork.value('udp',  _('UDP only'));
+        aoNetwork.default = 'both';
+        aoNetwork.rmempty = false;
+        aoNetwork.modalonly = true;
+
+        let aoPorts = sadv.option(form.Value, 'ports', _('Ports'),
+            _('Limit this block to specific ports, e.g. <code>443</code> or <code>1000-2000,443</code>. Default: all (0-65535).'));
+        aoPorts.modalonly = true;
+        aoPorts.placeholder = _('0-65535 (all)');
+        aoPorts.validate = function (sid, value) {
+            if (!value) return true;
+            return /^\s*\d+\s*(-\s*\d+\s*)?(\s*,\s*\d+\s*(-\s*\d+\s*)?)*$/.test(value)
+                ? true : _('Expected port numbers or ranges, e.g. 443 or 1000-2000,443');
+        };
+        aoPorts.write = function (sid, value) {
+            if (typeof value === 'string' && value.replace(/[\s,]/g, '').length > 0) {
+                uci.set(shared.variant, sid, 'ports', value.replace(/\s+/g, ''));
+            } else {
+                uci.unset(shared.variant, sid, 'ports');
+            }
+        };
 
         let aoLists = sadv.option(form.MultiValue, 'public_lists', _('Presets'),
             _('Curated lists from the catalog, applied to this block only.'));

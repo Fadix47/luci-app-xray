@@ -106,6 +106,13 @@ export function dns_rules(proxy, tcp_hijack_inbound_tags, udp_hijack_inbound_tag
     const dns_count = int(proxy["dns_count"] || 3);
     const fast_dns = parse_ip_port(proxy["fast_dns"] || fallback_fast_dns, 53);
     const secure_dns = parse_ip_port(proxy["secure_dns"] || fallback_secure_dns, 53);
+    const dns_via_proxy = proxy["dns_over_proxy"] == "1";
+    let dop_egress = { balancerTag: "udp_outbound_v4" };
+    if (dns_via_proxy && proxy["dns_over_proxy_target"]) {
+        const dop = split(proxy["dns_over_proxy_target"], ":");
+        if (dop[0] == "server" && dop[1]) dop_egress = { outboundTag: `advanced_server:${dop[1]}` };
+        if (dop[0] == "awg" && dop[1]) dop_egress = { outboundTag: `advanced_awg:${dop[1]}` };
+    }
     let dns_server_tags = [];
     for (let i = dns_port; i <= dns_port + dns_count; i++) {
         push(dns_server_tags, sprintf("dns_server_inbound:%d", i));
@@ -116,7 +123,7 @@ export function dns_rules(proxy, tcp_hijack_inbound_tags, udp_hijack_inbound_tag
             inboundTag: ["dns_conf_inbound"],
             ip: [fast_dns["ip"]],
             port: `${fast_dns["port"]}`,
-            outboundTag: "dynamic_direct"
+            ...(dns_via_proxy ? dop_egress : { outboundTag: "dynamic_direct" })
         },
         {
             type: "field",
@@ -130,11 +137,10 @@ export function dns_rules(proxy, tcp_hijack_inbound_tags, udp_hijack_inbound_tag
             inboundTag: dns_server_tags,
             outboundTag: "dns_server_outbound"
         },
-        // xray-internal DNS queries → direct; otherwise hostname servers black-hole.
         {
             type: "field",
             inboundTag: ["xray_internal_dns"],
-            outboundTag: "direct"
+            ...(dns_via_proxy ? dop_egress : { outboundTag: "direct" })
         },
     ];
     if (proxy.dns_tcp_hijack) {

@@ -72,13 +72,12 @@ function as_canon(v) {
     return "" + v;
 }
 
-// Stable identity: protocol + endpoint + credential + transport (alias may hold quota emoji).
 function canon_identity(s) {
     return digest.sha256(join("|", [
+        sub_id,
         as_canon(s.protocol),
         as_canon(s.server),
         as_canon(s.server_port),
-        as_canon(s.password),
         as_canon(s.transport)
     ]));
 }
@@ -142,6 +141,16 @@ c.foreach("xray_core", "general", function(g) {
         }
         push(balancer_snapshot, { gname: gname, bf: bf, tokens: tokens });
     }
+});
+
+// === STEP 1.5: snapshot routing_rule targets of this sub's servers.
+let routing_snapshot = [];
+c.foreach("xray_core", "routing_rule", function(r) {
+    let os = as_canon(r.outbound_server);
+    if (os == "") return;
+    if (as_canon(c.get("xray_core", os, "subscription_id")) != sub_id) return;
+    let s = c.get_all("xray_core", os);
+    push(routing_snapshot, { rname: r[".name"], identity: s ? canon_identity(s) : "" });
 });
 
 // === STEP 2: index existing sections. as_canon is needed because ucode-mod-uci
@@ -262,6 +271,15 @@ for (let snap in balancer_snapshot) {
 if (restored_count > 0 || dropped_count > 0) {
     warn(sprintf("xray-sub apply [%s]: balancer replay — %d restored, %d dropped\n",
         sub_id, restored_count, dropped_count));
+}
+
+// === STEP 5.5: replay routing_rule targets.
+for (let snap in routing_snapshot) {
+    let nn = new_section_by_id[snap.identity];
+    if (nn && as_canon(c.get("xray_core", snap.rname, "outbound_server")) != nn) {
+        c.set("xray_core", snap.rname, "outbound_server", nn);
+        balancer_changed = true;
+    }
 }
 
 // === STEP 6: first-import bootstrap. Only fires when every balancer is empty
